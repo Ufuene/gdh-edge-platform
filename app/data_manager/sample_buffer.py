@@ -32,11 +32,7 @@ class SampleBuffer:
             Número máximo de amostras armazenadas.
         """
 
-        # Armazena o tamanho máximo configurado do buffer.
         self._max_size = max_size
-
-        # Buffer circular que mantém automaticamente apenas as
-        # últimas 'max_size' amostras.
         self._buffer = deque(maxlen=max_size)
 
     def add_sample(self, sample: Sample):
@@ -53,29 +49,25 @@ class SampleBuffer:
 
     def get_latest(self):
         """
-        Retorna a amostra mais recente.
+        Retorna a amostra mais recente armazenada.
 
         Returns
         -------
         Sample | None
             Última amostra armazenada ou None se o buffer estiver vazio.
         """
-        pass
+
+        if self.is_empty():
+            return None
+
+        return self._buffer[-1]
 
     def get_last_samples(self, n: int):
         """
-        Retorna as últimas n amostras.
-
-        Parameters
-        ----------
-        n : int
-            Número de amostras desejadas.
-
-        Returns
-        -------
-        list[Sample]
+        Retorna as últimas n amostras armazenadas.
         """
-        pass
+
+        return list(self._buffer)[-n:]
 
     def get_sample(self, index: int):
         """
@@ -84,19 +76,19 @@ class SampleBuffer:
         Parameters
         ----------
         index : int
-            Índice da amostra.
 
         Returns
         -------
         Sample
         """
-        pass
+
+        return list(self._buffer)[index]
 
     def get_samples_range(self, start: int, end: int):
         """
         Retorna um intervalo de amostras.
 
-        O índice 'start' é inclusivo e o índice 'end' é exclusivo.
+        O índice start é inclusivo e o índice end é exclusivo.
 
         Parameters
         ----------
@@ -108,7 +100,8 @@ class SampleBuffer:
         -------
         list[Sample]
         """
-        pass
+
+        return list(self._buffer)[start:end]
 
     def get_all(self):
         """
@@ -118,22 +111,19 @@ class SampleBuffer:
         -------
         list[Sample]
         """
-        pass
+
+        return list(self._buffer)
 
     def clear(self):
         """
         Remove todas as amostras do buffer.
         """
-        pass
+
+        self._buffer.clear()
 
     def size(self) -> int:
         """
         Retorna a quantidade atual de amostras armazenadas.
-
-        Returns
-        -------
-        int
-            Número de amostras presentes no buffer.
         """
 
         return len(self._buffer)
@@ -141,12 +131,6 @@ class SampleBuffer:
     def is_empty(self) -> bool:
         """
         Verifica se o buffer está vazio.
-
-        Returns
-        -------
-        bool
-            True se não existir nenhuma amostra armazenada.
-            False caso contrário.
         """
 
         return self.size() == 0
@@ -154,13 +138,6 @@ class SampleBuffer:
     def has_minimum_samples(self, n: int) -> bool:
         """
         Verifica se o buffer possui pelo menos n amostras.
-
-        Parameters
-        ----------
-        n : int
-
-        Returns
-        -------
-        bool
         """
-        pass
+
+        return self.size() >= n
