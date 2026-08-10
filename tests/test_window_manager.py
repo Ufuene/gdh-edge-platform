@@ -1,8 +1,30 @@
+from datetime import datetime
+
+from app.data_manager.sample import Sample
 from app.data_manager.sample_buffer import SampleBuffer
 from app.data_manager.window_manager import (
     WindowManager,
     WindowState,
 )
+
+
+def create_sample(index: int) -> Sample:
+    """
+    Cria uma amostra de teste identificável pelo índice.
+    """
+
+    return Sample(
+        timestamp=datetime.now(),
+        irradiance=800 + index,
+        temperature=25,
+        v_pv=30,
+        i_pv=7,
+        v_out=14.5,
+        i_out=8,
+        i_bat=3,
+        i_load=5,
+        p_out=100 + index,
+    )
 
 
 def test_window_manager_creation():
@@ -237,3 +259,107 @@ def test_update_hysteresis_from_waiting_window():
     assert manager._state == WindowState.WAITING_WINDOW
 
     assert manager._hysteresis_counter == 0
+
+
+def test_add_sample_waits_for_four_future_samples():
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(buffer)
+
+    for index in range(7):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+
+    manager.add_sample()
+
+    assert manager._state == WindowState.WAITING_WINDOW
+
+    assert not manager.has_complete_window()
+
+    assert manager.get_current_window() is None
+
+
+def test_add_sample_builds_eight_sample_window():
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(buffer)
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+
+    manager.add_sample()
+
+    assert manager._state == WindowState.ACTIVE_EVENT
+
+    assert manager.has_complete_window()
+
+    window = manager.get_current_window()
+
+    assert len(window) == 8
+
+    assert window[0] == buffer.get_sample(0)
+    assert window[1] == buffer.get_sample(1)
+    assert window[2] == buffer.get_sample(2)
+
+    assert window[3] == buffer.get_sample(3)
+
+    assert window[4] == buffer.get_sample(4)
+    assert window[5] == buffer.get_sample(5)
+    assert window[6] == buffer.get_sample(6)
+    assert window[7] == buffer.get_sample(7)
+
+
+def test_add_sample_does_not_build_window_when_deviation_is_last_sample():
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(buffer)
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(7)
+
+    manager.add_sample()
+
+    assert manager._state == WindowState.WAITING_WINDOW
+
+    assert not manager.has_complete_window()
+
+    assert manager.get_current_window() is None
+
+
+def test_add_sample_builds_window_with_three_previous_and_four_future():
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(buffer)
+
+    for index in range(12):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(7)
+
+    manager.add_sample()
+
+    assert manager._state == WindowState.ACTIVE_EVENT
+
+    assert manager.has_complete_window()
+
+    window = manager.get_current_window()
+
+    assert len(window) == 8
+
+    assert window[0] == buffer.get_sample(4)
+    assert window[1] == buffer.get_sample(5)
+    assert window[2] == buffer.get_sample(6)
+    assert window[3] == buffer.get_sample(7)
+    assert window[4] == buffer.get_sample(8)
+    assert window[5] == buffer.get_sample(9)
+    assert window[6] == buffer.get_sample(10)
+    assert window[7] == buffer.get_sample(11)

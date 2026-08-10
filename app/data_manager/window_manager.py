@@ -30,11 +30,8 @@ class WindowState(Enum):
     """
 
     IDLE = auto()
-
     WAITING_WINDOW = auto()
-
     ACTIVE_EVENT = auto()
-
     HYSTERESIS = auto()
 
 
@@ -105,20 +102,83 @@ class WindowManager:
     def add_sample(self):
         """
         Notifica a chegada de uma nova amostra.
+
+        Quando o WindowManager estiver aguardando uma janela,
+        verifica se já existem amostras suficientes para construir
+        uma janela completa.
+
+        A janela possui exatamente:
+
+            previous_samples
+            +
+            amostra do desvio
+            +
+            future_samples
+
+        Com a configuração padrão:
+
+            3 + 1 + 4 = 8 amostras.
         """
-        pass
+
+        if self._state != WindowState.WAITING_WINDOW:
+            return
+
+        if self._deviation_index is None:
+            return
+
+        latest_index = self._sample_buffer.size() - 1
+
+        required_latest_index = self._deviation_index + self._future_samples
+
+        if latest_index < required_latest_index:
+            return
+
+        start_index = self._deviation_index - self._previous_samples
+
+        end_index = self._deviation_index + self._future_samples + 1
+
+        if start_index < 0:
+            return
+
+        window = self._sample_buffer.get_samples_range(
+            start_index,
+            end_index,
+        )
+
+        if len(window) != self._window_size:
+            return
+
+        self._current_window = window
+
+        self._state = WindowState.ACTIVE_EVENT
 
     def has_complete_window(self) -> bool:
         """
         Verifica se existe uma janela completa disponível.
+
+        Returns
+        -------
+        bool
+            True se existir uma janela completa.
+            False caso contrário.
         """
-        pass
+
+        return (
+            self._current_window is not None
+            and len(self._current_window) == self._window_size
+        )
 
     def get_current_window(self):
         """
         Retorna a janela atual.
+
+        Returns
+        -------
+        list | None
+            Janela atual ou None se ainda não existir uma janela.
         """
-        pass
+
+        return self._current_window
 
     def is_event_active(self) -> bool:
         """
