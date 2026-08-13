@@ -9,21 +9,26 @@ O InferenceOrchestrator coordena o fluxo entre:
     Sample
        |
        v
-DeviationDetector
+    ML1Service
        |
        v
-WindowManager
+    DeviationDetector
+       |
+       v
+    WindowManager
 
 Responsabilidades:
 
 - receber uma amostra;
+- utilizar o ML1Service para gerar a potência de referência
+  (Pref);
 - utilizar o DeviationDetector para verificar a existência
   de um desvio;
 - informar ao WindowManager o índice da amostra quando
   um desvio for detectado.
 
-O InferenceOrchestrator NÃO executa o ML1.
-O InferenceOrchestrator NÃO executa o ML2.
+O InferenceOrchestrator NÃO carrega o modelo ML1.
+O InferenceOrchestrator NÃO executa diretamente o modelo.
 O InferenceOrchestrator NÃO calcula diretamente o erro.
 O InferenceOrchestrator NÃO constrói janelas.
 O InferenceOrchestrator NÃO controla a histerese.
@@ -34,16 +39,18 @@ Essas responsabilidades pertencem aos componentes especializados.
 from app.data_manager.sample import Sample
 from app.data_manager.window_manager import WindowManager
 from app.inference.deviation_detector import DeviationDetector
+from app.inference.ml1_service import ML1Service
 
 
 class InferenceOrchestrator:
     """
-    Coordena o fluxo entre a amostra, o detector de desvios
-    e o WindowManager.
+    Coordena o fluxo entre a amostra, o ML1Service,
+    o detector de desvios e o WindowManager.
     """
 
     def __init__(
         self,
+        ml1_service: ML1Service,
         deviation_detector: DeviationDetector,
         window_manager: WindowManager,
     ):
@@ -52,6 +59,10 @@ class InferenceOrchestrator:
 
         Parameters
         ----------
+        ml1_service : ML1Service
+            Serviço responsável por executar a inferência
+            ponto a ponto do ML1.
+
         deviation_detector : DeviationDetector
             Detector responsável por determinar se existe
             desvio entre a potência medida e a potência prevista.
@@ -61,29 +72,34 @@ class InferenceOrchestrator:
             dos eventos de desvio.
         """
 
+        self._ml1_service = ml1_service
         self._deviation_detector = deviation_detector
         self._window_manager = window_manager
 
     def process_sample(
         self,
         sample: Sample,
-        predicted_power: float,
         sample_index: int,
     ) -> bool:
         """
-        Processa uma amostra utilizando a potência prevista.
+        Processa uma amostra através do fluxo ML1 → desvio.
 
-        Nesta etapa, a potência prevista é fornecida diretamente
-        ao orquestrador. Posteriormente, essa entrada será
-        substituída pela saída do ML1Service.
+        O ML1 recebe as três características utilizadas durante
+        o treinamento:
+
+            [Irradiancia, Temperatura, Vout]
+
+        e produz a potência de referência:
+
+            Pref
+
+        Essa potência é então comparada com a potência medida
+        da amostra pelo DeviationDetector.
 
         Parameters
         ----------
         sample : Sample
             Amostra adquirida do sistema fotovoltaico.
-
-        predicted_power : float
-            Potência prevista pelo ML1.
 
         sample_index : int
             Índice da amostra no SampleBuffer.
@@ -94,6 +110,12 @@ class InferenceOrchestrator:
             True se um desvio foi detectado.
             False caso contrário.
         """
+
+        predicted_power = self._ml1_service.predict(
+            irradiance=sample.irradiance,
+            temperature=sample.temperature,
+            v_out=sample.v_out,
+        )
 
         deviation_detected = self._deviation_detector.has_deviation(
             measured_power=sample.p_out,
