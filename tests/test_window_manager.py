@@ -405,3 +405,136 @@ def test_add_sample_builds_window_with_three_previous_and_four_future():
     assert window[5] == buffer.get_sample(9)
     assert window[6] == buffer.get_sample(10)
     assert window[7] == buffer.get_sample(11)
+
+
+def test_complete_event_lifecycle_with_hysteresis():
+    """
+    Verifica o ciclo completo de um evento:
+
+        IDLE
+        ↓
+        WAITING_WINDOW
+        ↓
+        ACTIVE_EVENT
+        ↓
+        HYSTERESIS
+        ↓
+        ACTIVE_EVENT
+        ↓
+        HYSTERESIS
+        ↓
+        IDLE
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+        hysteresis_samples=8,
+    )
+
+    # ==========================================================
+    # Construir contexto suficiente antes do desvio.
+    # ==========================================================
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    # ==========================================================
+    # Desvio no índice 3.
+    # ==========================================================
+
+    manager.notify_deviation(3)
+
+    assert manager._state == WindowState.WAITING_WINDOW
+    assert manager._deviation_index == 3
+
+    # ==========================================================
+    # Chegada da quarta amostra futura.
+    # ==========================================================
+
+    manager.add_sample()
+
+    assert manager._state == WindowState.ACTIVE_EVENT
+    assert manager.has_complete_window()
+
+    window = manager.get_current_window()
+
+    assert window is not None
+    assert len(window) == 8
+
+    # ==========================================================
+    # O desvio desaparece.
+    # ==========================================================
+
+    manager.update_hysteresis(False)
+
+    assert manager._state == WindowState.HYSTERESIS
+    assert manager._hysteresis_counter == 1
+
+    # ==========================================================
+    # Novo desvio durante a histerese.
+    # ==========================================================
+
+    manager.notify_deviation(7)
+
+    assert manager._state == WindowState.ACTIVE_EVENT
+    assert manager._deviation_index == 7
+    assert manager._hysteresis_counter == 0
+
+    # ==========================================================
+    # Novo período sem desvio.
+    # ==========================================================
+
+    manager.update_hysteresis(False)
+
+    assert manager._state == WindowState.HYSTERESIS
+    assert manager._hysteresis_counter == 1
+
+    # ==========================================================
+    # Ainda em histerese após 7 amostras sem desvio.
+    # ==========================================================
+
+    for _ in range(6):
+        manager.update_hysteresis(False)
+
+    assert manager._state == WindowState.HYSTERESIS
+    assert manager._hysteresis_counter == 7
+
+    # ==========================================================
+    # O oitavo período sem desvio encerra o evento.
+    # ==========================================================
+
+    manager.update_hysteresis(False)
+
+    assert manager._state == WindowState.IDLE
+    assert manager._deviation_index is None
+    assert manager._current_window is None
+    assert manager._hysteresis_counter == 0
+
+
+def test_invalid_early_deviation_does_not_break_hysteresis():
+    """
+    Verifica que um desvio sem contexto temporal suficiente
+    não reativa um evento durante a histerese.
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    manager._state = WindowState.HYSTERESIS
+    manager._hysteresis_counter = 3
+    manager._deviation_index = 10
+
+    manager.notify_deviation(2)
+
+    assert manager._state == WindowState.HYSTERESIS
+    assert manager._deviation_index == 10
+    assert manager._hysteresis_counter == 3

@@ -275,7 +275,6 @@ def test_real_inference_pipeline():
     # ==========================================================
 
     assert len(window) == 8
-
     assert window[3].p_out == 0.0
 
 
@@ -312,6 +311,10 @@ def test_real_pipeline_with_operational_psc_dataset():
         amostra do desvio
         +
         4 posteriores
+
+    A validação da janela é realizada no instante em que
+    ela é construída. O teste não depende de a janela
+    permanecer armazenada após o encerramento do evento.
     """
 
     # ==========================================================
@@ -368,6 +371,14 @@ def test_real_pipeline_with_operational_psc_dataset():
     assert len(rows) == 100
 
     # ==========================================================
+    # Variáveis para capturar o evento operacional no instante
+    # em que a janela for construída.
+    # ==========================================================
+
+    operational_window = None
+    operational_diagnosis = None
+
+    # ==========================================================
     # Processar as 100 amostras sequencialmente
     # ==========================================================
 
@@ -394,6 +405,31 @@ def test_real_pipeline_with_operational_psc_dataset():
 
         results.append(result)
 
+        # ======================================================
+        # Capturar a janela exatamente no momento em que
+        # o evento operacional esperado é classificado.
+        #
+        # O desvio está no índice 5, portanto a janela esperada
+        # contém os índices:
+        #
+        # 2, 3, 4, 5, 6, 7, 8, 9
+        #
+        # A posição central [3] corresponde ao índice 5.
+        # ======================================================
+
+        if window_manager.has_complete_window():
+
+            current_window = window_manager.get_current_window()
+
+            if (
+                current_window is not None
+                and len(current_window) == 8
+                and current_window[3].p_out == float(rows[5]["Pout"])
+            ):
+
+                operational_window = list(current_window)
+                operational_diagnosis = result.diagnosis
+
     # ==========================================================
     # O buffer deve conter as 100 amostras processadas.
     # ==========================================================
@@ -418,15 +454,24 @@ def test_real_pipeline_with_operational_psc_dataset():
     )
 
     # ==========================================================
-    # A janela operacional deve ter sido construída.
+    # Deve ter sido capturada a janela operacional.
+    #
+    # Importante:
+    #
+    # não verificamos o estado final do WindowManager,
+    # porque o evento pode ter sido encerrado posteriormente
+    # pela histerese.
     # ==========================================================
 
-    assert window_manager.has_complete_window()
+    assert operational_window is not None
+    assert len(operational_window) == 8
 
-    window = window_manager.get_current_window()
+    # ==========================================================
+    # O diagnóstico produzido no instante da classificação
+    # deve ser PSC.
+    # ==========================================================
 
-    assert window is not None
-    assert len(window) == 8
+    assert operational_diagnosis == 1
 
     # ==========================================================
     # A janela deve corresponder exatamente aos índices:
@@ -437,7 +482,7 @@ def test_real_pipeline_with_operational_psc_dataset():
     expected_window_indices = list(range(2, 10))
 
     for sample, expected_index in zip(
-        window,
+        operational_window,
         expected_window_indices,
     ):
 
@@ -467,7 +512,7 @@ def test_real_pipeline_with_operational_psc_dataset():
     # t4 da janela = índice 5 do dataset.
     # ==========================================================
 
-    deviation_sample = window[3]
+    deviation_sample = operational_window[3]
 
     assert deviation_sample.p_out == float(rows[5]["Pout"])
 
@@ -479,21 +524,17 @@ def test_real_pipeline_with_operational_psc_dataset():
     assert results[5].diagnosis is None
 
     # ==========================================================
-    # O ML2 deve ter sido executado quando a janela ficou
-    # completa.
+    # O ML2 deve ter sido executado na amostra 9.
     #
-    # Como o índice do desvio é 5, precisamos das amostras:
+    # O índice 5 é o desvio:
     #
-    # 6, 7, 8, 9
+    # 2, 3, 4, [5], 6, 7, 8, 9
     #
-    # portanto a janela fica completa na amostra 9.
+    # Portanto, são necessárias quatro amostras futuras:
+    # 6, 7, 8 e 9.
     # ==========================================================
 
-    assert results[9].diagnosis in (0, 1)
-
-    # ==========================================================
-    # O resultado final deve possuir um diagnóstico.
-    # ==========================================================
+    assert results[9].diagnosis == 1
 
     assert isinstance(
         results[9],
@@ -501,16 +542,23 @@ def test_real_pipeline_with_operational_psc_dataset():
     )
 
     # ==========================================================
+    # O diagnóstico capturado da janela deve coincidir com
+    # o diagnóstico produzido no momento da classificação.
+    # ==========================================================
+
+    assert operational_diagnosis == results[9].diagnosis
+
+    # ==========================================================
     # Verificação independente do ML2 usando exatamente
-    # a janela construída pelo WindowManager.
+    # a janela operacional capturada.
     #
     # Não altera o fluxo do Orchestrator; apenas confirma
     # que o mesmo ML2 reconhece essa mesma janela.
     # ==========================================================
 
-    direct_diagnosis = ml2_service.predict(window)
+    direct_diagnosis = ml2_service.predict(operational_window)
 
-    assert direct_diagnosis == results[9].diagnosis
+    assert direct_diagnosis == operational_diagnosis
 
     # ==========================================================
     # Informações úteis no output do teste.
@@ -523,5 +571,5 @@ def test_real_pipeline_with_operational_psc_dataset():
     print(f"Dataset samples      : {len(rows)}")
     print("First operational candidate index : 5")
     print("Operational window  : [2, 3, 4, 5, 6, 7, 8, 9]")
-    print(f"ML2 diagnosis       : {results[9].diagnosis}")
+    print(f"ML2 diagnosis       : {operational_diagnosis}")
     print("=" * 80)

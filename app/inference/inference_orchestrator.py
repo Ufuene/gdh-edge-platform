@@ -36,6 +36,8 @@ Responsabilidades:
 - informar ao WindowManager quando um desvio for detectado;
 - verificar a disponibilidade de uma janela completa;
 - executar o ML2 quando uma janela estiver disponível;
+- informar ao WindowManager o estado do desvio para atualização
+  da histerese;
 - produzir um InferenceResult.
 
 O InferenceOrchestrator NÃO implementa os modelos ML1 ou ML2.
@@ -124,6 +126,8 @@ class InferenceOrchestrator:
                 ↓
             ML2 (quando houver janela completa)
                 ↓
+            atualização da histerese
+                ↓
             InferenceResult
 
         Parameters
@@ -184,18 +188,34 @@ class InferenceOrchestrator:
             self._window_manager.notify_deviation(deviation_index=sample_index)
 
         # ==========================================================
-        # 5. Atualizar a janela temporal
+        # 5. Verificar se já existia uma janela completa antes
+        # desta amostra.
+        #
+        # Isso permite distinguir:
+        #
+        # - uma janela que já estava ativa;
+        # - uma janela que acabou de ser construída.
+        # ==========================================================
+
+        window_was_complete = self._window_manager.has_complete_window()
+
+        # ==========================================================
+        # 6. Atualizar a janela temporal
         # ==========================================================
 
         self._window_manager.add_sample()
 
+        window_is_complete = self._window_manager.has_complete_window()
+
+        window_became_complete = not window_was_complete and window_is_complete
+
         # ==========================================================
-        # 6. Executar ML2 quando houver uma janela completa
+        # 7. Executar ML2 quando houver uma janela completa
         # ==========================================================
 
         diagnosis = None
 
-        if self._window_manager.has_complete_window():
+        if window_is_complete:
 
             window = self._window_manager.get_current_window()
 
@@ -204,7 +224,21 @@ class InferenceOrchestrator:
             sample.diagnosis = diagnosis
 
         # ==========================================================
-        # 7. Produzir resultado agregado
+        # 8. Atualizar a histerese
+        #
+        # A amostra que acabou de completar a primeira janela
+        # pertence ao processo de construção/classificação do
+        # evento e não deve iniciar imediatamente a contagem
+        # da histerese.
+        # ==========================================================
+
+        if not window_became_complete:
+            self._window_manager.update_hysteresis(
+                deviation_detected=deviation_detected
+            )
+
+        # ==========================================================
+        # 9. Produzir resultado agregado
         # ==========================================================
 
         return InferenceResult(

@@ -570,3 +570,300 @@ def test_process_sample_builds_normal_ml2_diagnosis():
     assert ml2_service.received_window is not None
 
     assert results[-1].diagnosis == 0
+
+
+def test_event_lifecycle_with_hysteresis():
+    """
+    Verifica o ciclo integrado de um evento:
+
+        desvio válido
+            ↓
+        WAITING_WINDOW
+            ↓
+        janela completa
+            ↓
+        ACTIVE_EVENT
+            ↓
+        perda do desvio
+            ↓
+        HYSTERESIS
+            ↓
+        novo desvio
+            ↓
+        ACTIVE_EVENT
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    results = []
+
+    # ==========================================================
+    # Amostras 0, 1 e 2:
+    # ainda não existe contexto suficiente para iniciar evento.
+    # ==========================================================
+
+    for index in range(3):
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+        assert window_manager._state == WindowState.IDLE
+
+    # ==========================================================
+    # Índice 3:
+    # primeiro desvio válido.
+    # ==========================================================
+
+    sample = create_sample(
+        power=100.0,
+        index=3,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=3,
+    )
+
+    results.append(result)
+
+    assert result.deviation_detected is True
+    assert result.diagnosis is None
+
+    assert window_manager._state == WindowState.WAITING_WINDOW
+    assert window_manager._deviation_index == 3
+
+    # ==========================================================
+    # Índices 4, 5 e 6:
+    # fornecem contexto futuro.
+    # ==========================================================
+
+    for index in range(4, 7):
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+        assert window_manager._state == WindowState.WAITING_WINDOW
+
+    # ==========================================================
+    # Índice 7:
+    # quarta amostra futura.
+    #
+    # A janela [0..7] fica completa.
+    # ==========================================================
+
+    sample = create_sample(
+        power=120.0,
+        index=7,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=7,
+    )
+
+    results.append(result)
+
+    assert buffer.size() == 8
+
+    assert window_manager.has_complete_window()
+    assert window_manager._state == WindowState.ACTIVE_EVENT
+
+    assert ml2_service.received_window is not None
+    assert len(ml2_service.received_window) == 8
+
+    assert result.diagnosis == 1
+
+    # ==========================================================
+    # A amostra 7 completa a primeira janela.
+    #
+    # Embora não exista mais desvio nesta amostra, ela pertence
+    # ao processo de construção/classificação da janela.
+    # Portanto, o evento permanece ACTIVE_EVENT.
+    # ==========================================================
+
+    assert result.deviation_detected is False
+
+    assert window_manager._state == WindowState.ACTIVE_EVENT
+    assert window_manager._hysteresis_counter == 0
+
+    # ==========================================================
+    # Índice 8:
+    # primeira amostra posterior à janela completa sem desvio.
+    #
+    # Agora sim começa a histerese.
+    # ==========================================================
+
+    sample = create_sample(
+        power=120.0,
+        index=8,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=8,
+    )
+
+    assert result.deviation_detected is False
+
+    assert window_manager._state == WindowState.HYSTERESIS
+    assert window_manager._hysteresis_counter == 1
+
+    # ==========================================================
+    # Índice 9:
+    # novo desvio durante a histerese.
+    #
+    # O evento deve ser reativado.
+    # ==========================================================
+
+    sample = create_sample(
+        power=100.0,
+        index=9,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=9,
+    )
+
+    assert result.deviation_detected is True
+
+    assert window_manager._state == WindowState.ACTIVE_EVENT
+    assert window_manager._hysteresis_counter == 0
+
+
+def test_event_lifecycle_ends_after_hysteresis():
+    """
+    Verifica que um evento ativo termina após
+    hysteresis_samples ciclos consecutivos sem desvio.
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    # ==========================================================
+    # Criar uma janela válida com desvio no índice 3.
+    # ==========================================================
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+    # ==========================================================
+    # A janela deve estar completa e o evento ativo.
+    # ==========================================================
+
+    assert buffer.size() == 8
+    assert window_manager.has_complete_window()
+    assert window_manager._state == WindowState.ACTIVE_EVENT
+
+    assert ml2_service.received_window is not None
+    assert result.diagnosis == 1
+
+    # ==========================================================
+    # A primeira amostra posterior à janela sem desvio
+    # inicia a histerese.
+    # ==========================================================
+
+    sample = create_sample(
+        power=120.0,
+        index=8,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=8,
+    )
+
+    assert result.deviation_detected is False
+
+    assert window_manager._state == WindowState.HYSTERESIS
+    assert window_manager._hysteresis_counter == 1
+
+    # ==========================================================
+    # Mais 6 amostras sem desvio.
+    #
+    # O contador deve chegar a 7, mas ainda não encerrar.
+    # ==========================================================
+
+    for index in range(9, 15):
+
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        assert result.deviation_detected is False
+
+    assert window_manager._state == WindowState.HYSTERESIS
+    assert window_manager._hysteresis_counter == 7
+
+    # ==========================================================
+    # O oitavo ciclo sem desvio encerra o evento.
+    # ==========================================================
+
+    sample = create_sample(
+        power=120.0,
+        index=15,
+    )
+
+    result = orchestrator.process_sample(
+        sample=sample,
+        sample_index=15,
+    )
+
+    assert result.deviation_detected is False
+
+    assert window_manager._state == WindowState.IDLE
+    assert window_manager._deviation_index is None
+    assert window_manager._current_window is None
+    assert window_manager._hysteresis_counter == 0
