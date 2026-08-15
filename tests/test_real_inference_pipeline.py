@@ -1,10 +1,11 @@
 """
 test_real_inference_pipeline.py
 
-Teste de integração do pipeline real de inferência do GDH Edge.
+Testes de integração do pipeline real de inferência do GDH Edge.
 
-Fluxo validado:
+Fluxos validados:
 
+    Teste 1:
     Sample
         ↓
     SampleBuffer
@@ -15,15 +16,32 @@ Fluxo validado:
         ↓
     WindowManager
         ↓
-    8 Samples
-        ↓
     ML2Service + modelo real
         ↓
     InferenceResult
 
+
+    Teste 2:
+    Dataset PSC operacional — 100 amostras
+        ↓
+    processamento sequencial
+        ↓
+    ML1 real
+        ↓
+    desvio operacional real
+        ↓
+    WindowManager
+        ↓
+    janela 3 + 1 + 4
+        ↓
+    ML2 real
+        ↓
+    diagnóstico
+
 Este arquivo NÃO altera os testes unitários existentes.
 """
 
+import csv
 from datetime import datetime
 from pathlib import Path
 
@@ -42,6 +60,10 @@ PROJECT_ROOT = Path("/home/ufuene/gdh-platform")
 
 ML1_MODEL_PATH = PROJECT_ROOT / "models/ml1/RandomForest_ML1_CPU.pkl"
 ML2_MODEL_PATH = PROJECT_ROOT / "models/ml2/RandomForest_ML2_cpu.pkl"
+
+OPERATIONAL_PSC_DATASET = (
+    PROJECT_ROOT / "datasets/ml2/test/" / "Dataset_PSC_Teste_20_30s_100amostras.csv"
+)
 
 POWER_THRESHOLD = 5.0
 
@@ -129,6 +151,8 @@ def create_pipeline():
         orchestrator,
         sample_buffer,
         window_manager,
+        ml1_service,
+        ml2_service,
     )
 
 
@@ -151,6 +175,8 @@ def test_real_inference_pipeline():
         orchestrator,
         sample_buffer,
         window_manager,
+        _,
+        _,
     ) = create_pipeline()
 
     results = []
@@ -180,8 +206,6 @@ def test_real_inference_pipeline():
     for index in range(8):
         p_out = 15.0
 
-        # Introduz uma redução intencional de potência
-        # na quarta amostra.
         if index == 3:
             p_out = 0.0
 
@@ -252,5 +276,252 @@ def test_real_inference_pipeline():
 
     assert len(window) == 8
 
-    # O índice 3 corresponde à quarta amostra.
     assert window[3].p_out == 0.0
+
+
+def test_real_pipeline_with_operational_psc_dataset():
+    """
+    Executa o pipeline real sobre o dataset operacional PSC
+    de 100 amostras.
+
+    O dataset contém somente as variáveis de aquisição:
+
+        Irradiancia
+        Temperatura
+        Vout
+        Iout
+        Ipv
+        Vpv
+        Iload
+        Pout
+        Ibat
+
+    O Pref é produzido pelo ML1 em tempo de execução.
+
+    O primeiro desvio previamente identificado no Raspberry
+    ocorre no índice 5.
+
+    A janela operacional esperada é:
+
+        2, 3, 4, 5, 6, 7, 8, 9
+
+    correspondendo a:
+
+        3 anteriores
+        +
+        amostra do desvio
+        +
+        4 posteriores
+    """
+
+    # ==========================================================
+    # Validar existência do dataset
+    # ==========================================================
+
+    assert OPERATIONAL_PSC_DATASET.exists(), (
+        "Operational PSC dataset not found: " f"{OPERATIONAL_PSC_DATASET}"
+    )
+
+    # ==========================================================
+    # Criar pipeline real
+    # ==========================================================
+
+    (
+        orchestrator,
+        sample_buffer,
+        window_manager,
+        ml1_service,
+        ml2_service,
+    ) = create_pipeline()
+
+    # ==========================================================
+    # Ler CSV
+    # ==========================================================
+
+    with OPERATIONAL_PSC_DATASET.open(
+        "r",
+        newline="",
+    ) as file:
+
+        reader = csv.DictReader(file)
+
+        expected_columns = [
+            "Irradiancia",
+            "Temperatura",
+            "Vout",
+            "Iout",
+            "Ipv",
+            "Vpv",
+            "Iload",
+            "Pout",
+            "Ibat",
+        ]
+
+        assert reader.fieldnames == expected_columns
+
+        rows = list(reader)
+
+    # ==========================================================
+    # Validar dataset
+    # ==========================================================
+
+    assert len(rows) == 100
+
+    # ==========================================================
+    # Processar as 100 amostras sequencialmente
+    # ==========================================================
+
+    results = []
+
+    for index, row in enumerate(rows):
+
+        sample = create_sample(
+            irradiance=float(row["Irradiancia"]),
+            temperature=float(row["Temperatura"]),
+            v_pv=float(row["Vpv"]),
+            i_pv=float(row["Ipv"]),
+            v_out=float(row["Vout"]),
+            i_out=float(row["Iout"]),
+            i_bat=float(row["Ibat"]),
+            i_load=float(row["Iload"]),
+            p_out=float(row["Pout"]),
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+    # ==========================================================
+    # O buffer deve conter as 100 amostras processadas.
+    # ==========================================================
+
+    assert sample_buffer.size() == 100
+
+    # ==========================================================
+    # O primeiro desvio identificado pelo ML1 deve ser o
+    # índice 0 ou 2 antes do evento operacional escolhido.
+    #
+    # O primeiro candidato com contexto suficiente é o índice 5.
+    # ==========================================================
+
+    assert results[5].deviation_detected is True
+
+    assert results[5].predicted_power == (
+        ml1_service.predict(
+            irradiance=float(rows[5]["Irradiancia"]),
+            temperature=float(rows[5]["Temperatura"]),
+            v_out=float(rows[5]["Vout"]),
+        )
+    )
+
+    # ==========================================================
+    # A janela operacional deve ter sido construída.
+    # ==========================================================
+
+    assert window_manager.has_complete_window()
+
+    window = window_manager.get_current_window()
+
+    assert window is not None
+    assert len(window) == 8
+
+    # ==========================================================
+    # A janela deve corresponder exatamente aos índices:
+    #
+    # 2, 3, 4, 5, 6, 7, 8, 9
+    # ==========================================================
+
+    expected_window_indices = list(range(2, 10))
+
+    for sample, expected_index in zip(
+        window,
+        expected_window_indices,
+    ):
+
+        expected_row = rows[expected_index]
+
+        assert sample.irradiance == float(expected_row["Irradiancia"])
+
+        assert sample.temperature == float(expected_row["Temperatura"])
+
+        assert sample.v_out == float(expected_row["Vout"])
+
+        assert sample.i_out == float(expected_row["Iout"])
+
+        assert sample.i_pv == float(expected_row["Ipv"])
+
+        assert sample.v_pv == float(expected_row["Vpv"])
+
+        assert sample.i_load == float(expected_row["Iload"])
+
+        assert sample.p_out == float(expected_row["Pout"])
+
+        assert sample.i_bat == float(expected_row["Ibat"])
+
+    # ==========================================================
+    # A amostra de desvio deve estar na posição central:
+    #
+    # t4 da janela = índice 5 do dataset.
+    # ==========================================================
+
+    deviation_sample = window[3]
+
+    assert deviation_sample.p_out == float(rows[5]["Pout"])
+
+    # ==========================================================
+    # O resultado da amostra de desvio deve indicar desvio.
+    # ==========================================================
+
+    assert results[5].deviation_detected is True
+    assert results[5].diagnosis is None
+
+    # ==========================================================
+    # O ML2 deve ter sido executado quando a janela ficou
+    # completa.
+    #
+    # Como o índice do desvio é 5, precisamos das amostras:
+    #
+    # 6, 7, 8, 9
+    #
+    # portanto a janela fica completa na amostra 9.
+    # ==========================================================
+
+    assert results[9].diagnosis in (0, 1)
+
+    # ==========================================================
+    # O resultado final deve possuir um diagnóstico.
+    # ==========================================================
+
+    assert isinstance(
+        results[9],
+        InferenceResult,
+    )
+
+    # ==========================================================
+    # Verificação independente do ML2 usando exatamente
+    # a janela construída pelo WindowManager.
+    #
+    # Não altera o fluxo do Orchestrator; apenas confirma
+    # que o mesmo ML2 reconhece essa mesma janela.
+    # ==========================================================
+
+    direct_diagnosis = ml2_service.predict(window)
+
+    assert direct_diagnosis == results[9].diagnosis
+
+    # ==========================================================
+    # Informações úteis no output do teste.
+    # ==========================================================
+
+    print()
+    print("=" * 80)
+    print("REAL OPERATIONAL PSC PIPELINE")
+    print("=" * 80)
+    print(f"Dataset samples      : {len(rows)}")
+    print("First operational candidate index : 5")
+    print("Operational window  : [2, 3, 4, 5, 6, 7, 8, 9]")
+    print(f"ML2 diagnosis       : {results[9].diagnosis}")
+    print("=" * 80)

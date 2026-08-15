@@ -110,6 +110,48 @@ def test_notify_deviation_from_idle():
     assert manager._deviation_index == 25
 
 
+def test_notify_deviation_requires_previous_context():
+    """
+    Verifica que um desvio não pode iniciar um evento antes
+    de existir o número mínimo de amostras anteriores.
+
+    Com previous_samples=3:
+
+        índice 0 → rejeitado
+        índice 1 → rejeitado
+        índice 2 → rejeitado
+        índice 3 → aceito
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    manager.notify_deviation(0)
+
+    assert manager._state == WindowState.IDLE
+    assert manager._deviation_index is None
+
+    manager.notify_deviation(1)
+
+    assert manager._state == WindowState.IDLE
+    assert manager._deviation_index is None
+
+    manager.notify_deviation(2)
+
+    assert manager._state == WindowState.IDLE
+    assert manager._deviation_index is None
+
+    manager.notify_deviation(3)
+
+    assert manager._state == WindowState.WAITING_WINDOW
+    assert manager._deviation_index == 3
+
+
 def test_notify_deviation_from_waiting_window():
 
     buffer = SampleBuffer()

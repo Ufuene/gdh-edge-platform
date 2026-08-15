@@ -79,17 +79,48 @@ class WindowManager:
         """
         Notifica o WindowManager que um desvio foi detectado.
 
+        Um desvio somente pode iniciar um novo evento quando
+        já existirem amostras anteriores suficientes para formar
+        a janela temporal completa.
+
+        Com a configuração padrão:
+
+            previous_samples = 3
+
+        portanto:
+
+            deviation_index < 3
+                → não inicia evento
+
+            deviation_index >= 3
+                → pode iniciar evento
+
         Parameters
         ----------
         deviation_index : int
             Índice da amostra onde o desvio foi detectado.
         """
 
+        # ======================================================
+        # Verificar contexto temporal mínimo
+        # ======================================================
+
+        if deviation_index < self._previous_samples:
+            return
+
+        # ======================================================
+        # Evento inicial
+        # ======================================================
+
         if self._state == WindowState.IDLE:
 
             self._state = WindowState.WAITING_WINDOW
 
             self._deviation_index = deviation_index
+
+        # ======================================================
+        # Novo desvio durante a histerese
+        # ======================================================
 
         elif self._state == WindowState.HYSTERESIS:
 

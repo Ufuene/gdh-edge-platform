@@ -199,15 +199,16 @@ def test_process_sample_without_deviation():
     assert ml2_service.received_window is None
 
 
-def test_process_sample_with_deviation_waits_for_window():
+def test_process_sample_with_early_deviation_does_not_start_event():
     """
-    Verifica que uma amostra com desvio:
+    Verifica que um desvio detectado antes da existência
+    do contexto temporal mínimo não inicia um evento.
 
-    - é adicionada ao buffer;
-    - é detectada pelo DeviationDetector;
-    - ativa o WindowManager;
-    - ainda não executa o ML2;
-    - retorna diagnosis=None enquanto a janela estiver incompleta.
+    Com previous_samples=3, o índice 0 não possui
+    três amostras anteriores.
+
+    O ML1 e o DeviationDetector continuam funcionando,
+    mas o WindowManager permanece em IDLE.
     """
 
     (
@@ -236,8 +237,10 @@ def test_process_sample_with_deviation_waits_for_window():
     assert result.diagnosis is None
 
     assert buffer.size() == 1
-    assert window_manager._state == WindowState.WAITING_WINDOW
-    assert window_manager._deviation_index == 0
+
+    assert window_manager._state == WindowState.IDLE
+    assert window_manager._deviation_index is None
+
     assert ml2_service.received_window is None
 
     assert sample.predicted_power == 120.0
@@ -366,6 +369,9 @@ def test_process_sample_is_point_by_point_for_ml1():
     """
     Verifica que o ML1 continua sendo executado
     individualmente para cada amostra.
+
+    Também verifica que desvios detectados durante o
+    warm-up não iniciam eventos temporais.
     """
 
     (
@@ -419,8 +425,10 @@ def test_process_sample_is_point_by_point_for_ml1():
     assert result_2.diagnosis is None
 
     assert buffer.size() == 2
-    assert window_manager._state == WindowState.WAITING_WINDOW
-    assert window_manager._deviation_index == 1
+
+    # Índice 1 ainda não possui três amostras anteriores.
+    assert window_manager._state == WindowState.IDLE
+    assert window_manager._deviation_index is None
 
     assert ml1_service.received_inputs == {
         "irradiance": 851.0,
