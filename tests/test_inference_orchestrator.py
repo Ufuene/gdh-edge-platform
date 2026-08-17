@@ -867,3 +867,592 @@ def test_event_lifecycle_ends_after_hysteresis():
     assert window_manager._deviation_index is None
     assert window_manager._current_window is None
     assert window_manager._hysteresis_counter == 0
+
+
+def test_orchestrator_does_not_reclassify_consumed_window():
+    """
+    Verifica que uma janela já consumida pelo pipeline
+    não é enviada novamente ao ML2.
+
+    Fluxo:
+
+        primeira janela
+            ↓
+        ML2
+            ↓
+        consume
+            ↓
+        novas amostras insuficientes para nova janela
+            ↓
+        ML2 não deve ser chamado novamente
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    # ==========================================================
+    # Construir a primeira janela [0..7]
+    # ==========================================================
+
+    results = []
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+    # ==========================================================
+    # A primeira janela deve ter sido classificada.
+    # ==========================================================
+
+    assert window_manager.has_complete_window()
+    assert window_manager.is_current_window_consumed() is True
+
+    first_window = window_manager.get_current_window()
+
+    assert first_window is not None
+    assert len(first_window) == 8
+
+    assert ml2_service.received_window is first_window
+
+    assert results[7].diagnosis == 1
+
+    # ==========================================================
+    # Adicionar algumas amostras posteriores, mas ainda sem
+    # completar uma segunda janela.
+    # ==========================================================
+
+    for index in range(8, 12):
+
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        assert result.diagnosis is None
+
+    # ==========================================================
+    # A janela anterior continua armazenada, mas permanece
+    # consumida.
+    # ==========================================================
+
+    assert window_manager.has_complete_window()
+    assert window_manager.is_current_window_consumed() is True
+
+    assert window_manager.get_current_window() is first_window
+
+    assert buffer.size() == 12
+
+    # O ML2 não deve ter recebido uma nova janela.
+    assert ml2_service.received_window is first_window
+
+
+def test_orchestrator_builds_next_non_overlapping_window_after_consumption():
+    """
+    Verifica a integração entre o InferenceOrchestrator e o
+    mecanismo de construção de janelas não sobrepostas.
+
+    Primeira janela:
+
+        [0, 1, 2, 3, 4, 5, 6, 7]
+
+    Segunda janela:
+
+        [8, 9, 10, 11, 12, 13, 14, 15]
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    # ==========================================================
+    # Primeira janela.
+    #
+    # Desvio no índice 3.
+    # ==========================================================
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+    assert result.diagnosis == 1
+
+    assert window_manager.has_complete_window()
+    assert window_manager.is_current_window_consumed() is True
+
+    assert window_manager.get_current_window_start_index() == 0
+    assert window_manager.get_current_window_end_index() == 7
+    assert window_manager.get_next_window_start_index() == 8
+
+    first_window = window_manager.get_current_window()
+
+    assert first_window is not None
+    assert len(first_window) == 8
+
+    # ==========================================================
+    # Forçar explicitamente a construção da próxima janela.
+    #
+    # O WindowManager já possui a regra temporal:
+    #
+    # próxima janela = start 8
+    # ==========================================================
+
+    for index in range(8, 16):
+        buffer.add_sample(
+            create_sample(
+                power=120.0,
+                index=index,
+            )
+        )
+
+    window_manager.build_next_window()
+
+    # ==========================================================
+    # A segunda janela deve ser não sobreposta.
+    # ==========================================================
+
+    assert window_manager.has_complete_window()
+
+    second_window = window_manager.get_current_window()
+
+    assert second_window is not None
+    assert len(second_window) == 8
+
+    assert window_manager.get_current_window_start_index() == 8
+    assert window_manager.get_current_window_end_index() == 15
+
+    assert second_window is not first_window
+
+    for position, sample in enumerate(second_window):
+        assert sample is buffer.get_sample(8 + position)
+
+    # ==========================================================
+    # A segunda janela ainda não foi consumida.
+    # ==========================================================
+
+    assert window_manager.is_current_window_consumed() is False
+
+    # O ML2 ainda não recebeu a segunda janela, pois ela foi
+    # construída diretamente pelo WindowManager.
+    assert ml2_service.received_window is first_window
+
+
+def test_orchestrator_classifies_second_non_overlapping_window():
+    """
+    Verifica o ciclo completo de duas janelas não sobrepostas
+    através do pipeline.
+
+    Janela 1:
+
+        [0..7]
+
+    Janela 2:
+
+        [8..15]
+
+    Cada janela deve ser classificada exatamente uma vez.
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    # ==========================================================
+    # Primeira janela [0..7].
+    #
+    # Desvio no índice 3.
+    # ==========================================================
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+    assert result.diagnosis == 1
+
+    first_window = window_manager.get_current_window()
+
+    assert first_window is not None
+    assert len(first_window) == 8
+    assert window_manager.is_current_window_consumed() is True
+
+    assert ml2_service.received_window is first_window
+
+    # ==========================================================
+    # Encerrar explicitamente o ciclo da primeira janela.
+    #
+    # O WindowManager deve permitir a construção da próxima
+    # janela somente depois do consumo.
+    # ==========================================================
+
+    for index in range(8, 16):
+
+        buffer.add_sample(
+            create_sample(
+                power=120.0,
+                index=index,
+            )
+        )
+
+    window_manager.build_next_window()
+
+    assert window_manager.has_complete_window()
+
+    second_window = window_manager.get_current_window()
+
+    assert second_window is not None
+    assert len(second_window) == 8
+
+    assert window_manager.get_current_window_start_index() == 8
+    assert window_manager.get_current_window_end_index() == 15
+
+    assert second_window is not first_window
+
+    assert window_manager.is_current_window_consumed() is False
+
+    # ==========================================================
+    # O Orchestrator deve poder consumir/classificar a nova
+    # janela disponível.
+    #
+    # Como a segunda janela já foi construída fora do fluxo
+    # process_sample(), executamos explicitamente o mesmo
+    # mecanismo de consumo utilizado pelo Orchestrator.
+    # ==========================================================
+
+    diagnosis = ml2_service.predict(second_window)
+
+    assert diagnosis == 1
+
+    window_manager.consume_current_window()
+
+    assert window_manager.is_current_window_consumed() is True
+
+    assert ml2_service.received_window is second_window
+
+    # ==========================================================
+    # As duas janelas são distintas e não sobrepostas.
+    # ==========================================================
+
+    assert first_window[0] is buffer.get_sample(0)
+    assert first_window[-1] is buffer.get_sample(7)
+
+    assert second_window[0] is buffer.get_sample(8)
+    assert second_window[-1] is buffer.get_sample(15)
+
+
+def test_process_sample_builds_next_non_overlapping_window():
+    """
+    Verifica a integração do InferenceOrchestrator com o mecanismo
+    de consumo e construção de janelas não sobrepostas.
+
+    Primeira janela:
+
+        [0, 1, 2, 3, 4, 5, 6, 7]
+
+    Segunda janela:
+
+        [8, 9, 10, 11, 12, 13, 14, 15]
+
+    O objetivo é garantir que:
+
+    1. a primeira janela seja classificada pelo ML2;
+    2. a primeira janela seja consumida;
+    3. as oito amostras seguintes sejam processadas;
+    4. uma segunda janela seja construída automaticamente;
+    5. a segunda janela seja enviada novamente ao ML2;
+    6. nenhuma amostra da primeira janela seja reutilizada.
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    results = []
+
+    # ==========================================================
+    # PRIMEIRA JANELA
+    #
+    # Desvio no índice 3:
+    #
+    # [0, 1, 2, 3, 4, 5, 6, 7]
+    # ==========================================================
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+    # ==========================================================
+    # A primeira janela deve ter sido classificada.
+    # ==========================================================
+
+    assert buffer.size() == 8
+
+    assert window_manager.has_complete_window()
+
+    assert window_manager.get_current_window_start_index() == 0
+
+    assert window_manager.get_current_window_end_index() == 7
+
+    assert ml2_service.received_window is not None
+    assert len(ml2_service.received_window) == 8
+
+    first_window = list(ml2_service.received_window)
+
+    assert first_window[0] == buffer.get_sample(0)
+    assert first_window[7] == buffer.get_sample(7)
+
+    assert results[7].diagnosis == 1
+
+    # ==========================================================
+    # A primeira janela deve ter sido consumida.
+    # ==========================================================
+
+    assert window_manager.is_current_window_consumed() is True
+
+    # ==========================================================
+    # SEGUNDA JANELA
+    #
+    # Adicionar as oito amostras seguintes:
+    #
+    # [8, 9, 10, 11, 12, 13, 14, 15]
+    # ==========================================================
+
+    for index in range(8, 16):
+
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        results.append(result)
+
+    # ==========================================================
+    # O buffer deve conter as 16 amostras.
+    # ==========================================================
+
+    assert buffer.size() == 16
+
+    # ==========================================================
+    # A segunda janela deve ter sido construída.
+    # ==========================================================
+
+    assert window_manager.has_complete_window()
+
+    assert window_manager.get_current_window_start_index() == 8
+
+    assert window_manager.get_current_window_end_index() == 15
+
+    second_window = window_manager.get_current_window()
+
+    assert second_window is not None
+    assert len(second_window) == 8
+
+    # ==========================================================
+    # A segunda janela não pode conter nenhuma amostra
+    # da primeira janela.
+    # ==========================================================
+
+    for position, expected_index in enumerate(range(8, 16)):
+
+        assert second_window[position] == buffer.get_sample(expected_index)
+
+    # ==========================================================
+    # A segunda janela também deve ter sido enviada ao ML2.
+    # ==========================================================
+
+    assert ml2_service.received_window is second_window
+
+    # ==========================================================
+    # O diagnóstico deve estar disponível na amostra 15,
+    # que completa a segunda janela.
+    # ==========================================================
+
+    assert results[15].diagnosis == 1
+
+    # ==========================================================
+    # A segunda janela deve ter sido consumida.
+    # ==========================================================
+
+    assert window_manager.is_current_window_consumed() is True
+
+
+def test_process_sample_does_not_build_next_window_early():
+    """
+    Verifica que o InferenceOrchestrator não constrói a próxima
+    janela antes de existirem as oito novas amostras necessárias.
+
+    Após a primeira janela [0..7] ser consumida, apenas sete
+    amostras novas [8..14] não são suficientes.
+
+    Portanto, a segunda janela [8..15] ainda não pode existir.
+    """
+
+    (
+        orchestrator,
+        _,
+        ml2_service,
+        _,
+        window_manager,
+        buffer,
+    ) = create_orchestrator(
+        predicted_power=120.0,
+        diagnosis=1,
+    )
+
+    # ==========================================================
+    # Primeira janela [0..7]
+    # ==========================================================
+
+    for index in range(8):
+
+        power = 100.0 if index == 3 else 120.0
+
+        sample = create_sample(
+            power=power,
+            index=index,
+        )
+
+        orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+    assert buffer.size() == 8
+
+    assert window_manager.get_current_window_start_index() == 0
+
+    assert window_manager.get_current_window_end_index() == 7
+
+    assert ml2_service.received_window is not None
+
+    first_window = ml2_service.received_window
+
+    assert len(first_window) == 8
+
+    assert window_manager.is_current_window_consumed() is True
+
+    # ==========================================================
+    # Adicionar somente sete novas amostras:
+    #
+    # [8, 9, 10, 11, 12, 13, 14]
+    # ==========================================================
+
+    for index in range(8, 15):
+
+        sample = create_sample(
+            power=120.0,
+            index=index,
+        )
+
+        result = orchestrator.process_sample(
+            sample=sample,
+            sample_index=index,
+        )
+
+        # Nenhum novo diagnóstico deve surgir porque
+        # a segunda janela ainda não está completa.
+        assert result.diagnosis is None
+
+    # ==========================================================
+    # Ainda existem somente sete amostras para a segunda janela.
+    # ==========================================================
+
+    assert buffer.size() == 15
+
+    assert window_manager.get_current_window_start_index() == 0
+
+    assert window_manager.get_current_window_end_index() == 7
+
+    # A janela armazenada continua sendo a primeira.
+    assert window_manager.get_current_window() is first_window
+
+    # O ML2 não deve ter recebido uma nova janela.
+    assert ml2_service.received_window is first_window
+
+    # A primeira janela continua consumida.
+    assert window_manager.is_current_window_consumed() is True

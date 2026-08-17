@@ -415,9 +415,13 @@ def test_real_pipeline_with_operational_psc_dataset():
         # 2, 3, 4, 5, 6, 7, 8, 9
         #
         # A posição central [3] corresponde ao índice 5.
+        #
+        # IMPORTANTE:
+        # A captura somente ocorre quando o ML2 realmente
+        # produziu um diagnóstico nesta amostra.
         # ======================================================
 
-        if window_manager.has_complete_window():
+        if result.diagnosis is not None and window_manager.has_complete_window():
 
             current_window = window_manager.get_current_window()
 

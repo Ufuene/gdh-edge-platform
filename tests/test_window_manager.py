@@ -538,3 +538,256 @@ def test_invalid_early_deviation_does_not_break_hysteresis():
     assert manager._state == WindowState.HYSTERESIS
     assert manager._deviation_index == 10
     assert manager._hysteresis_counter == 3
+
+
+def test_window_manager_registers_next_non_overlapping_window_start():
+    """
+    Verifica que, após construir uma janela de 8 amostras,
+    o WindowManager registra corretamente o início da próxima
+    janela não sobreposta.
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+
+    manager.add_sample()
+
+    assert manager.has_complete_window()
+
+    assert manager.get_current_window_start_index() == 0
+    assert manager.get_current_window_end_index() == 7
+
+    assert manager.get_next_window_start_index() == 8
+
+
+def test_window_manager_next_window_starts_after_current_window():
+    """
+    Verifica explicitamente a regra de janelas não sobrepostas.
+
+    Para uma janela:
+
+        [2, 3, 4, 5, 6, 7, 8, 9]
+
+    a próxima deverá começar em:
+
+        10
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    for index in range(10):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(5)
+
+    manager.add_sample()
+
+    assert manager.has_complete_window()
+
+    assert manager.get_current_window_start_index() == 2
+    assert manager.get_current_window_end_index() == 9
+
+    assert manager.get_next_window_start_index() == 10
+
+
+def test_window_manager_does_not_build_next_window_before_consumption():
+    """
+    Verifica que uma nova janela não sobreposta não é construída
+    enquanto a janela atual ainda não tiver sido consumida.
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    # ----------------------------------------------------------
+    # Primeira janela:
+    #
+    # [0, 1, 2, 3, 4, 5, 6, 7]
+    # ----------------------------------------------------------
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+    manager.add_sample()
+
+    assert manager.has_complete_window()
+    assert manager.get_current_window_start_index() == 0
+    assert manager.get_current_window_end_index() == 7
+    assert manager.get_next_window_start_index() == 8
+
+    # ----------------------------------------------------------
+    # A janela ainda não foi consumida.
+    # ----------------------------------------------------------
+
+    assert manager.is_current_window_consumed() is False
+
+    # ----------------------------------------------------------
+    # Adicionar amostras suficientes para a próxima janela
+    # não deve substituí-la enquanto ela não for consumida.
+    # ----------------------------------------------------------
+
+    for index in range(8, 16):
+        buffer.add_sample(create_sample(index))
+
+    manager.add_sample()
+
+    assert manager.get_current_window_start_index() == 0
+    assert manager.get_current_window_end_index() == 7
+
+    window = manager.get_current_window()
+
+    assert window is not None
+    assert len(window) == 8
+
+    assert window[0] == buffer.get_sample(0)
+    assert window[7] == buffer.get_sample(7)
+
+
+def test_window_manager_builds_next_window_after_consumption():
+    """
+    Verifica que, depois de consumir a janela atual, o
+    WindowManager consegue construir a próxima janela
+    não sobreposta quando houver amostras suficientes.
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    # ----------------------------------------------------------
+    # Primeira janela:
+    #
+    # [0, 1, 2, 3, 4, 5, 6, 7]
+    # ----------------------------------------------------------
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+    manager.add_sample()
+
+    assert manager.has_complete_window()
+
+    assert manager.get_current_window_start_index() == 0
+    assert manager.get_current_window_end_index() == 7
+    assert manager.get_next_window_start_index() == 8
+
+    # ----------------------------------------------------------
+    # Consumir primeira janela.
+    # ----------------------------------------------------------
+
+    manager.consume_current_window()
+
+    assert manager.is_current_window_consumed() is True
+
+    # ----------------------------------------------------------
+    # Adicionar as oito amostras seguintes.
+    #
+    # Segunda janela esperada:
+    #
+    # [8, 9, 10, 11, 12, 13, 14, 15]
+    # ----------------------------------------------------------
+
+    for index in range(8, 16):
+        buffer.add_sample(create_sample(index))
+
+    # ----------------------------------------------------------
+    # Solicitar construção da próxima janela.
+    # ----------------------------------------------------------
+
+    manager.build_next_window()
+
+    assert manager.has_complete_window()
+
+    assert manager.get_current_window_start_index() == 8
+    assert manager.get_current_window_end_index() == 15
+
+    assert manager.get_next_window_start_index() == 16
+
+    window = manager.get_current_window()
+
+    assert window is not None
+    assert len(window) == 8
+
+    for position, expected_index in enumerate(range(8, 16)):
+        assert window[position] == buffer.get_sample(expected_index)
+
+
+def test_window_manager_next_window_remains_unavailable_without_enough_samples():
+    """
+    Verifica que o WindowManager não constrói a próxima janela
+    antes de existirem as oito amostras necessárias.
+    """
+
+    buffer = SampleBuffer()
+
+    manager = WindowManager(
+        buffer,
+        previous_samples=3,
+        future_samples=4,
+    )
+
+    # ----------------------------------------------------------
+    # Primeira janela.
+    # ----------------------------------------------------------
+
+    for index in range(8):
+        buffer.add_sample(create_sample(index))
+
+    manager.notify_deviation(3)
+    manager.add_sample()
+
+    assert manager.has_complete_window()
+
+    manager.consume_current_window()
+
+    # ----------------------------------------------------------
+    # Apenas sete amostras da próxima janela.
+    # ----------------------------------------------------------
+
+    for index in range(8, 15):
+        buffer.add_sample(create_sample(index))
+
+    manager.build_next_window()
+
+    # ----------------------------------------------------------
+    # A janela anterior continua registrada porque ainda não
+    # existe contexto suficiente para substituir a janela.
+    # ----------------------------------------------------------
+
+    assert manager.get_current_window_start_index() == 0
+    assert manager.get_current_window_end_index() == 7
+
+    window = manager.get_current_window()
+
+    assert window is not None
+    assert len(window) == 8
+
+    assert window[0] == buffer.get_sample(0)
+    assert window[7] == buffer.get_sample(7)
