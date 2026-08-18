@@ -36,6 +36,7 @@ Responsabilidades:
 - informar ao WindowManager quando um desvio for detectado;
 - verificar a disponibilidade de uma janela completa;
 - executar o ML2 quando uma janela estiver disponível;
+- preservar as amostras da janela efetivamente utilizada pelo ML2;
 - consumir explicitamente a janela após sua classificação;
 - solicitar a construção da próxima janela não sobreposta
   quando houver amostras suficientes;
@@ -48,6 +49,7 @@ O InferenceOrchestrator NÃO calcula diretamente as regras internas
 dos modelos.
 O InferenceOrchestrator NÃO constrói diretamente as janelas.
 O InferenceOrchestrator NÃO controla a histerese.
+O InferenceOrchestrator NÃO decide a elegibilidade para datasets.
 
 Essas responsabilidades pertencem aos componentes especializados.
 """
@@ -106,6 +108,8 @@ class InferenceOrchestrator:
             WindowManager
                 ↓
             ML2
+                ↓
+            preservação das amostras da janela
                 ↓
             consumo da janela
                 ↓
@@ -181,17 +185,69 @@ class InferenceOrchestrator:
         window_became_complete = not window_was_complete and window_is_complete
 
         # ==========================================================
-        # 7. Executar ML2 para uma janela nova ainda não consumida.
+        # 7. Estado da inferência ML2 neste ciclo.
         #
-        # Isso cobre a primeira janela do evento.
+        # Esses valores representam fatos da execução.
+        #
+        # A decisão de elegibilidade para datasets pertence ao
+        # DatasetManager.
         # ==========================================================
 
         diagnosis = None
 
+        ml2_executed = False
+
+        window_available = False
+
+        window_start = None
+        window_end = None
+
+        # ----------------------------------------------------------
+        # Amostras da janela efetivamente enviada ao ML2.
+        #
+        # None significa que o ML2 não foi executado neste ciclo.
+        # ----------------------------------------------------------
+
+        window_samples = None
+
+        # ==========================================================
+        # 8. Executar ML2 para uma janela nova ainda não consumida.
+        #
+        # Isso cobre a primeira janela do evento.
+        # ==========================================================
+
         if window_is_complete and self._window_manager.has_unconsumed_window():
+
             window = self._window_manager.get_current_window()
 
+            # ------------------------------------------------------
+            # Capturar os metadados ANTES de qualquer alteração
+            # posterior da janela corrente.
+            # ------------------------------------------------------
+
+            window_start = self._window_manager.get_current_window_start_index()
+
+            window_end = self._window_manager.get_current_window_end_index()
+
+            window_available = True
+
+            # ------------------------------------------------------
+            # Preservar uma cópia da janela efetivamente enviada
+            # ao ML2.
+            #
+            # A cópia é importante porque o WindowManager poderá
+            # posteriormente substituir a janela corrente.
+            # ------------------------------------------------------
+
+            window_samples = list(window)
+
+            # ------------------------------------------------------
+            # Executar ML2.
+            # ------------------------------------------------------
+
             diagnosis = self._ml2_service.predict(window)
+
+            ml2_executed = True
 
             sample.diagnosis = diagnosis
 
@@ -202,7 +258,7 @@ class InferenceOrchestrator:
             self._window_manager.consume_current_window()
 
         # ==========================================================
-        # 8. Construir a próxima janela não sobreposta.
+        # 9. Construir a próxima janela não sobreposta.
         #
         # Exemplo:
         #
@@ -221,7 +277,7 @@ class InferenceOrchestrator:
         next_window_built = self._window_manager.build_next_window()
 
         # ==========================================================
-        # 9. Se uma nova janela foi construída, executar ML2 e
+        # 10. Se uma nova janela foi construída, executar ML2 e
         # consumi-la.
         # ==========================================================
 
@@ -229,14 +285,41 @@ class InferenceOrchestrator:
 
             window = self._window_manager.get_current_window()
 
+            # ------------------------------------------------------
+            # Atualizar os metadados para a janela efetivamente
+            # enviada ao ML2.
+            # ------------------------------------------------------
+
+            window_start = self._window_manager.get_current_window_start_index()
+
+            window_end = self._window_manager.get_current_window_end_index()
+
+            window_available = True
+
+            # ------------------------------------------------------
+            # Preservar uma cópia da nova janela.
+            # ------------------------------------------------------
+
+            window_samples = list(window)
+
+            # ------------------------------------------------------
+            # Executar ML2.
+            # ------------------------------------------------------
+
             diagnosis = self._ml2_service.predict(window)
 
+            ml2_executed = True
+
             sample.diagnosis = diagnosis
+
+            # ------------------------------------------------------
+            # Consumir a janela após a classificação.
+            # ------------------------------------------------------
 
             self._window_manager.consume_current_window()
 
         # ==========================================================
-        # 10. Atualizar a histerese.
+        # 11. Atualizar a histerese.
         #
         # A primeira amostra que completa a primeira janela do
         # evento não inicia imediatamente a contagem da histerese.
@@ -264,7 +347,12 @@ class InferenceOrchestrator:
             )
 
         # ==========================================================
-        # 11. Produzir resultado agregado.
+        # 12. Produzir resultado agregado.
+        #
+        # O resultado contém somente fatos da inferência.
+        #
+        # A elegibilidade para ML1/ML2 é determinada posteriormente
+        # pelo DatasetManager.
         # ==========================================================
 
         return InferenceResult(
@@ -272,4 +360,9 @@ class InferenceOrchestrator:
             deviation=deviation,
             deviation_detected=deviation_detected,
             diagnosis=diagnosis,
+            ml2_executed=ml2_executed,
+            window_available=window_available,
+            window_start=window_start,
+            window_end=window_end,
+            window_samples=window_samples,
         )

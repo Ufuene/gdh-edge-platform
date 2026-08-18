@@ -33,6 +33,9 @@ Arquitetura:
        |
        v
     InferenceResult
+       |
+       v
+    DatasetManager
 
 O main.py é responsável somente pela composição
 dos componentes da aplicação.
@@ -49,6 +52,8 @@ from app.communication.mqtt_subscriber import (
 
 from app.data_manager.sample_buffer import SampleBuffer
 from app.data_manager.window_manager import WindowManager
+
+from app.datasets.dataset_manager import DatasetManager
 
 from app.inference.deviation_detector import DeviationDetector
 from app.inference.inference_orchestrator import InferenceOrchestrator
@@ -67,6 +72,15 @@ ML1_MODEL_PATH = PROJECT_ROOT / "models/ml1/RandomForest_ML1_CPU.pkl"
 ML2_MODEL_PATH = PROJECT_ROOT / "models/ml2/RandomForest_ML2_cpu.pkl"
 
 POWER_THRESHOLD = 5.0
+
+
+# ============================================================
+# ESTADO GLOBAL DA APLICAÇÃO
+# ============================================================
+
+runtime = None
+
+dataset_manager = None
 
 
 # ============================================================
@@ -91,11 +105,9 @@ def load_models():
     print(f"ML2 model   : {ML2_MODEL_PATH}")
 
     if not ML1_MODEL_PATH.exists():
-
         raise FileNotFoundError(f"ML1 model not found: {ML1_MODEL_PATH}")
 
     if not ML2_MODEL_PATH.exists():
-
         raise FileNotFoundError(f"ML2 model not found: {ML2_MODEL_PATH}")
 
     print()
@@ -117,25 +129,22 @@ def load_models():
     # --------------------------------------------------------
 
     if ml1_model.n_features_in_ != 3:
-
         raise ValueError("ML1 deve possuir exatamente 3 features.")
 
     if ml2_model.n_features_in_ != 72:
-
         raise ValueError("ML2 deve possuir exatamente 72 features.")
 
     if list(ml2_model.classes_) != [0, 1]:
-
         raise ValueError("ML2 deve possuir classes [0, 1].")
 
     print()
     print("IDENTIDADE DOS MODELOS VALIDADA")
 
-    print(f"ML1 features : " f"{ml1_model.n_features_in_}")
+    print(f"ML1 features : {ml1_model.n_features_in_}")
 
-    print(f"ML2 features : " f"{ml2_model.n_features_in_}")
+    print(f"ML2 features : {ml2_model.n_features_in_}")
 
-    print(f"ML2 classes  : " f"{list(ml2_model.classes_)}")
+    print(f"ML2 classes  : {list(ml2_model.classes_)}")
 
     return ml1_model, ml2_model
 
@@ -147,7 +156,13 @@ def load_models():
 
 def create_pipeline():
     """
-    Cria todos os componentes do pipeline de inferência.
+    Cria os componentes da plataforma de inferência
+    e o DatasetManager.
+
+    Retorna
+    -------
+    tuple
+        (InferenceRuntime, DatasetManager)
     """
 
     # ========================================================
@@ -206,7 +221,13 @@ def create_pipeline():
 
     runtime = InferenceRuntime(orchestrator)
 
-    return runtime
+    # ========================================================
+    # DATASET MANAGER
+    # ========================================================
+
+    dataset_manager = DatasetManager()
+
+    return runtime, dataset_manager
 
 
 # ============================================================
@@ -219,8 +240,9 @@ def handle_message(
     subscriber_index: int,
 ):
     """
-    Recebe uma mensagem validada pelo MQTTSubscriber
-    e encaminha a Sample para o InferenceRuntime.
+    Recebe uma mensagem validada pelo MQTTSubscriber,
+    executa a inferência e encaminha o resultado ao
+    DatasetManager.
 
     O subscriber_index é mantido apenas como informação
     da camada de comunicação.
@@ -231,25 +253,60 @@ def handle_message(
     print("INTEGRACAO MQTT -> INFERENCE")
     print("=" * 60)
 
-    print(f"Device ID       : " f"{message.device_id}")
+    print(f"Device ID       : {message.device_id}")
 
-    print(f"Sequence        : " f"{message.sequence}")
+    print(f"Sequence        : {message.sequence}")
 
-    print(f"Subscriber index: " f"{subscriber_index}")
+    print(f"Subscriber index: {subscriber_index}")
+
+    # ========================================================
+    # INFERÊNCIA
+    # ========================================================
 
     result = runtime.process_message(message)
+
+    # ========================================================
+    # DATASET MANAGER
+    # ========================================================
+
+    ml1_record, ml2_window = dataset_manager.process_sample(
+        sample=message.sample,
+        result=result,
+    )
+
+    # ========================================================
+    # RESULTADO DA INFERÊNCIA
+    # ========================================================
 
     print()
     print("RESULTADO DA INFERENCIA")
     print("-" * 60)
 
-    print(f"Pref            : " f"{result.predicted_power:.4f}")
+    print(f"Pref            : {result.predicted_power:.4f}")
 
-    print(f"Deviation       : " f"{result.deviation:.4f}")
+    print(f"Deviation       : {result.deviation:.4f}")
 
-    print(f"Deviation       : " f"{result.deviation_detected}")
+    print(f"Deviation       : {result.deviation_detected}")
 
-    print(f"Diagnosis       : " f"{result.diagnosis}")
+    print(f"Diagnosis       : {result.diagnosis}")
+
+    # ========================================================
+    # DATASET
+    # ========================================================
+
+    print()
+    print("DATASET")
+    print("-" * 60)
+
+    print(f"ML1 eligible    : " f"{dataset_manager.is_ml1_eligible(result)}")
+
+    print(f"ML1 record      : " f"{ml1_record is not None}")
+
+    print(f"ML2 window      : " f"{ml2_window is not None}")
+
+    if ml2_window is not None:
+        print(f"ML2 window ID   : {ml2_window.window_id}")
+        print(f"ML2 window label: {ml2_window.label}")
 
     print("=" * 60)
 
@@ -261,7 +318,7 @@ def handle_message(
 
 def main():
 
-    global runtime
+    global runtime, dataset_manager
 
     print()
     print("=" * 60)
@@ -271,7 +328,7 @@ def main():
     print()
     print("Inicializando pipeline de inferência...")
 
-    runtime = create_pipeline()
+    runtime, dataset_manager = create_pipeline()
 
     print()
     print("Pipeline de inferência inicializado.")
@@ -299,6 +356,10 @@ def main():
     print("InferenceOrchestrator")
     print("  ↓")
     print("ML1 / WindowManager / ML2")
+    print("  ↓")
+    print("InferenceResult")
+    print("  ↓")
+    print("DatasetManager")
     print()
     print("Aguardando dados...")
     print()
