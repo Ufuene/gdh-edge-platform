@@ -36,6 +36,19 @@ Arquitetura:
        |
        v
     DatasetManager
+       |
+       v
+    GDH Cloud Payload
+       |
+       v
+    AWSPublisher
+       |
+       | MQTT/TLS
+       v
+    AWS IoT Core
+       |
+       v
+    S3
 
 O main.py é responsável somente pela composição
 dos componentes da aplicação.
@@ -44,6 +57,10 @@ dos componentes da aplicação.
 from pathlib import Path
 
 import joblib
+
+from app.cloud.aws_client import AWSIoTClient
+from app.cloud.aws_publisher import AWSPublisher
+from app.cloud.gdh_cloud_payload import build_gdh_cloud_payload
 
 from app.communication.mqtt_subscriber import (
     MQTTSubscriber,
@@ -81,6 +98,10 @@ POWER_THRESHOLD = 5.0
 runtime = None
 
 dataset_manager = None
+
+aws_client = None
+
+aws_publisher = None
 
 
 # ============================================================
@@ -275,6 +296,51 @@ def handle_message(
     )
 
     # ========================================================
+    # PAYLOAD CLOUD
+    # ========================================================
+
+    cloud_payload = build_gdh_cloud_payload(
+        sample=message.sample,
+        result=result,
+        ml1_record=ml1_record,
+        ml2_window=ml2_window,
+        device_id=message.device_id,
+        sequence=message.sequence,
+    )
+
+    # ========================================================
+    # PUBLICAÇÃO AWS
+    # ========================================================
+
+    if aws_publisher is not None:
+
+        try:
+
+            published = aws_publisher.publish(cloud_payload)
+
+            print()
+            print("AWS CLOUD")
+            print("-" * 60)
+
+            print(f"Publicado        : {published}")
+
+        except Exception as exc:
+
+            print()
+            print("AWS CLOUD")
+            print("-" * 60)
+
+            print(f"Falha publicação : {exc}")
+
+    else:
+
+        print()
+        print("AWS CLOUD")
+        print("-" * 60)
+
+        print("Publisher AWS não inicializado.")
+
+    # ========================================================
     # RESULTADO DA INFERÊNCIA
     # ========================================================
 
@@ -319,6 +385,7 @@ def handle_message(
 def main():
 
     global runtime, dataset_manager
+    global aws_client, aws_publisher
 
     print()
     print("=" * 60)
@@ -334,6 +401,18 @@ def main():
     print("Pipeline de inferência inicializado.")
 
     print()
+    print("Inicializando AWS IoT Core...")
+
+    aws_client = AWSIoTClient()
+
+    aws_publisher = AWSPublisher(aws_client)
+
+    aws_client.connect()
+
+    print()
+    print("AWS IoT Core inicializado.")
+
+    print()
     print("Inicializando MQTT Subscriber...")
 
     subscriber = MQTTSubscriber(message_handler=handle_message)
@@ -342,9 +421,11 @@ def main():
 
     print()
     print("Sistema pronto.")
+
     print()
     print("Fluxo ativo:")
     print()
+
     print("ESP32")
     print("  ↓")
     print("Mosquitto")
@@ -355,11 +436,20 @@ def main():
     print("  ↓")
     print("InferenceOrchestrator")
     print("  ↓")
-    print("ML1 / WindowManager / ML2")
+    print("ML1 / DeviationDetector / WindowManager / ML2")
     print("  ↓")
     print("InferenceResult")
     print("  ↓")
     print("DatasetManager")
+    print("  ↓")
+    print("GDH Cloud Payload")
+    print("  ↓")
+    print("AWSPublisher")
+    print("  ↓")
+    print("AWS IoT Core")
+    print("  ↓")
+    print("S3")
+
     print()
     print("Aguardando dados...")
     print()
