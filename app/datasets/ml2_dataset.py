@@ -32,10 +32,36 @@ Um caso:
 
 Isso evita utilizar uma decisão possivelmente errada do ML2
 como fonte de verdade para o dataset normal.
+
+Representação da janela:
+
+    O modelo ML2 utiliza 72 features.
+
+    A janela temporal possui 8 amostras.
+
+    Cada amostra contém 9 grandezas:
+
+        1. Irradiancia
+        2. Temperatura
+        3. Vout
+        4. Iout
+        5. Ipv
+        6. Vpv
+        7. Iload
+        8. Pout
+        9. Ibat
+
+    Portanto:
+
+        8 × 9 = 72 features
+
+A serialização da janela preserva explicitamente essa
+representação para que os dados armazenados no Cloud/S3
+possam posteriormente ser utilizados na construção de
+novos datasets e modelos ML2.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Sequence
 
 from app.data_manager.sample import Sample
@@ -104,6 +130,24 @@ class ML2DatasetWindow:
     def to_dict(self) -> dict:
         """
         Converte a janela para uma estrutura serializável.
+
+        A ordem das grandezas em cada amostra é preservada
+        explicitamente de acordo com a representação canônica
+        utilizada pelo dataset ML2:
+
+            1. Irradiancia
+            2. Temperatura
+            3. Vout
+            4. Iout
+            5. Ipv
+            6. Vpv
+            7. Iload
+            8. Pout
+            9. Ibat
+
+        O modelo ML2 utiliza:
+
+            8 amostras × 9 grandezas = 72 features
         """
 
         return {
@@ -114,10 +158,18 @@ class ML2DatasetWindow:
             "samples": [
                 {
                     "timestamp": sample.timestamp.isoformat(),
-                    "irradiance": sample.irradiance,
-                    "temperature": sample.temperature,
-                    "v_out": sample.v_out,
-                    "p_out": sample.p_out,
+                    # ==================================================
+                    # ORDEM CANÔNICA DO DATASET ML2
+                    # ==================================================
+                    "Irradiancia": sample.irradiance,
+                    "Temperatura": sample.temperature,
+                    "Vout": sample.v_out,
+                    "Iout": sample.i_out,
+                    "Ipv": sample.i_pv,
+                    "Vpv": sample.v_pv,
+                    "Iload": sample.i_load,
+                    "Pout": sample.p_out,
+                    "Ibat": sample.i_bat,
                 }
                 for sample in self.samples
             ],

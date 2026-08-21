@@ -7,6 +7,10 @@ from app.datasets.dataset_manager import DatasetManager
 from app.inference.deviation_detector import DeviationDetector
 from app.inference.inference_orchestrator import InferenceOrchestrator
 
+# ============================================================
+# TEST SERVICES
+# ============================================================
+
 
 class FakeML1Service:
     """
@@ -35,13 +39,33 @@ class FakeML2Service:
         return 1
 
 
+# ============================================================
+# SAMPLE FIXTURE
+# ============================================================
+
+
 def create_sample(sequence: int) -> Sample:
     """
     Cria uma amostra saudável identificável pela sequência.
+
+    A cadência temporal utilizada pelo teste corresponde à
+    cadência operacional do GDH Edge:
+
+        1 amostra / 5 segundos
+
+    Portanto:
+
+        sequence = 1 -> +5 s
+        sequence = 2 -> +10 s
+        ...
+        sequence = 8 -> +40 s
+
+    As oito amostras formam, portanto, uma sequência temporal
+    contínua válida para uma janela ML2.
     """
 
     return Sample(
-        timestamp=datetime(2026, 8, 17) + timedelta(seconds=sequence),
+        timestamp=datetime(2026, 8, 17) + timedelta(seconds=sequence * 5),
         irradiance=800.0,
         temperature=35.0,
         v_pv=30.0,
@@ -52,6 +76,11 @@ def create_sample(sequence: int) -> Sample:
         i_load=2.0,
         p_out=58.8,
     )
+
+
+# ============================================================
+# ORCHESTRATOR
+# ============================================================
 
 
 def create_orchestrator():
@@ -81,6 +110,11 @@ def create_orchestrator():
     )
 
 
+# ============================================================
+# INTEGRATION TEST
+# ============================================================
+
+
 def test_healthy_inference_result_flows_into_dataset_manager():
     """
     Verifica o fluxo:
@@ -91,7 +125,7 @@ def test_healthy_inference_result_flows_into_dataset_manager():
                 ↓
         DatasetManager
 
-    Para oito amostras saudáveis:
+    Para oito amostras saudáveis e temporalmente contínuas:
 
         8 registros ML1
         +
@@ -106,6 +140,8 @@ def test_healthy_inference_result_flows_into_dataset_manager():
 
     # ----------------------------------------------------------
     # Processar oito amostras saudáveis.
+    #
+    # As amostras possuem cadência de 5 segundos.
     # ----------------------------------------------------------
 
     for sequence in range(1, 9):
@@ -176,6 +212,21 @@ def test_healthy_inference_result_flows_into_dataset_manager():
     ]
 
     assert actual_timestamps == expected_timestamps
+
+    # ----------------------------------------------------------
+    # Verificar explicitamente a continuidade temporal.
+    #
+    # Cada amostra deve estar exatamente 5 segundos depois
+    # da anterior.
+    # ----------------------------------------------------------
+
+    for previous, current in zip(
+        window.samples,
+        window.samples[1:],
+    ):
+        delta = (current.timestamp - previous.timestamp).total_seconds()
+
+        assert delta == 5.0
 
     # ----------------------------------------------------------
     # O resultado da inferência continua independente do
